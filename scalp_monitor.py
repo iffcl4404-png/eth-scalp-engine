@@ -12,6 +12,10 @@ from scalp_engine import (
     score_signal, signal_verdict, detect_news_bias,
     ActivePosition, record_trade, get_stats
 )
+from scalp_skills import (
+    urithiru_check, mental_model_check, eth_distribution_check,
+    grade_news_impact, validate_params
+)
 
 OUTPUT = os.path.expanduser("~/Desktop/scalp-report.txt")
 PROXY = "http://127.0.0.1:7897"
@@ -40,6 +44,7 @@ def main():
         t = api_get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP")['data'][0]
         price = float(t['last'])
         low, high = float(t['low24h']), float(t['high24h'])
+        vol = float(t.get('vol24h', 0))
         chg = (price - float(t['open24h'])) / float(t['open24h']) * 100
 
         fr = api_get("https://www.okx.com/api/v5/public/funding-rate?instId=ETH-USDT-SWAP")
@@ -50,7 +55,7 @@ def main():
 
         # K线
         candles = api_get("https://www.okx.com/api/v5/market/candles?instId=ETH-USDT-SWAP&bar=15m&limit=6")
-        klines = [{'o': float(c[1]), 'h': float(c[2]), 'l': float(c[3]), 'c': float(c[4])} for c in candles['data'][:6]]
+        klines = [{'o': float(c[1]), 'h': float(c[2]), 'l': float(c[3]), 'c': float(c[4]), 'vol': float(c[5])} for c in candles['data'][:6]]
         latest = klines[0]
         body = abs(latest['c'] - latest['o'])
         wl = min(latest['c'], latest['o']) - latest['l']
@@ -84,6 +89,24 @@ def main():
         sig_score, sig_details = score_signal(price, fear, rate, bias, import_bias, kline_signal)
         verdict, verdict_note = signal_verdict(sig_score)
 
+        # ---- Alpha Skills 6 技能 ----
+        # 1. urithiru: 3-lane verification
+        uri_ok, uri_conf, uri_reasons = urithiru_check(price, bias, sig_score, import_bias, trend)
+
+        # 2. mental-model: cognitive stress test
+        mm = mental_model_check(bias, pos.entry, pos.stop, pos.tp, DEFAULT_CFG.account,
+                                " | ".join(g["content"][:60] for g in geo_items[:2]))
+
+        # 3. ibd-distribution: sell pressure assessment
+        ibd = eth_distribution_check(klines, price, vol)
+
+        # 4. market-news-analyst: impact grading
+        news_grade = grade_news_impact(geo_items, macro_items, crypto_items)
+
+        # 5. backtest-expert: parameter validation
+        bt = validate_params(DEFAULT_CFG.stop_pts, DEFAULT_CFG.tp_pts,
+                             DEFAULT_CFG.account, DEFAULT_CFG.leverage, DEFAULT_CFG.margin_pct)
+
         # ---- 报告 ----
         report = f"""{sep}
   {now}  ETH 短线面板
@@ -108,7 +131,16 @@ def main():
   评分     {sig_score}/100  {verdict}
   趋势     {sig_details.get('趋势','')}  │  情绪  {sig_details.get('情绪','')}
   消息     {sig_details.get('消息','')}  │  执行  {sig_details.get('执行','')}
-  →       {verdict_note}"""
+  →       {verdict_note}
+
+{sep}
+  Alpha Skills 六技能
+{sep}
+  Urithiru    {'PASS' if uri_ok else 'FAIL'} ({uri_conf}%)  {' | '.join(uri_reasons)}
+  思维模型    {mm['verdict']}  (逆: {len(mm['inversion'])} / 一阶: {len(mm['first_principles'])} / 二阶: {len(mm['second_order'])})
+  IBD 风险    {ibd['risk']} ({ibd['d_count']}派发/{ibd['lookback_candles']}烛)
+  消息分级    {news_grade['level']} (均{news_grade['avg_impact']}/10)
+  参数验证    {'OK' if bt['valid'] else ', '.join(bt['issues'])}  RR={bt['rr']}  最大亏{bt['max_loss_pct']}%"""
 
         # 消息快讯
         all_items = []
