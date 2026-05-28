@@ -288,6 +288,249 @@ def validate_params(stop_pts, tp_pts, account, leverage, margin_pct):
 
 
 # ============================================================
+# 7. exposure-coach — 净敞口上限
+# ============================================================
+
+def exposure_coach(ibd_risk, news_level, sig_score, active_positions=0):
+    """
+    Calculate max exposure ceiling based on market conditions.
+    Adapted from exposure-coach: synthesize breadth/regime/flow into net exposure.
+    """
+    base_exposure = 100  # % of normal position
+
+    # IBD risk reduction
+    risk_cuts = {"NORMAL": 0, "CAUTION": 25, "HIGH": 50, "SEVERE": 75, "UNKNOWN": 50}
+    base_exposure -= risk_cuts.get(ibd_risk, 50)
+
+    # News impact reduction
+    if news_level == "HIGH":
+        base_exposure -= 10
+    elif news_level == "LOW":
+        base_exposure += 5
+
+    # Signal quality boost
+    if sig_score >= 80:
+        base_exposure += 10
+    elif sig_score < 55:
+        base_exposure -= 20
+
+    # Active positions reduction
+    if active_positions >= 2:
+        base_exposure -= 30
+    elif active_positions >= 1:
+        base_exposure -= 15
+
+    exposure = max(0, min(100, base_exposure))
+    if exposure >= 75:
+        rec = "FULL_SIZE"
+    elif exposure >= 50:
+        rec = "HALF_SIZE"
+    elif exposure >= 25:
+        rec = "QUARTER_SIZE"
+    else:
+        rec = "NO_TRADE"
+
+    return {"exposure_pct": exposure, "recommendation": rec}
+
+
+# ============================================================
+# 8. economic-calendar-fetcher — 事件驱动预判
+# ============================================================
+
+def check_event_risk(jin10_events):
+    """
+    Check if any high-impact economic events are imminent.
+    Adapted from economic-calendar-fetcher.
+    """
+    now = datetime.now(TZ)
+    warnings = []
+    for ev in jin10_events:
+        try:
+            ev_time_str = ev.get("pub_time", "")
+            if len(ev_time_str) >= 16:
+                ev_time = datetime.strptime(ev_time_str[:16], "%Y-%m-%d %H:%M")
+                ev_time = ev_time.replace(tzinfo=TZ)
+                minutes_away = (ev_time - now).total_seconds() / 60
+                if 0 <= minutes_away <= 120 and ev.get("star", 0) >= 2:
+                    warnings.append({
+                        "title": ev.get("title", ""),
+                        "minutes_away": int(minutes_away),
+                        "star": ev.get("star", 1),
+                        "previous": ev.get("previous", ""),
+                        "consensus": ev.get("consensus", "")
+                    })
+        except:
+            continue
+
+    warnings.sort(key=lambda x: x["minutes_away"])
+    risk = "HIGH" if any(w["star"] >= 3 and w["minutes_away"] <= 60 for w in warnings) else \
+           "MEDIUM" if warnings else "LOW"
+    return {"risk": risk, "warnings": warnings[:3]}
+
+
+# ============================================================
+# 9. breakout-trade-planner — ETH 突破追单
+# ============================================================
+
+def breakout_plan(price, high_1h, low_1h, bias):
+    """
+    Adapt Minervini breakout methodology for ETH 15m scalping.
+    Key levels: 1h high/low as breakout triggers.
+    """
+    if bias == "做空":
+        breakdown = low_1h - 2  # break below 1h low
+        entry = round(breakdown - 3, 1)
+        stop = round(breakdown + 5, 1)
+        tp = round(breakdown - 10, 1)
+        trigger = f"跌破 ${breakdown:.1f}"
+    else:
+        breakout = high_1h + 2  # break above 1h high
+        entry = round(breakout + 3, 1)
+        stop = round(breakout - 5, 1)
+        tp = round(breakout + 10, 1)
+        trigger = f"突破 ${breakout:.1f}"
+
+    rr = round(abs(entry - tp) / abs(entry - stop), 1) if abs(entry - stop) > 0 else 0
+
+    return {
+        "trigger": trigger,
+        "entry": entry, "stop": stop, "tp": tp,
+        "rr": rr,
+        "valid": rr >= 1.5
+    }
+
+
+# ============================================================
+# 10. edge-signal-aggregator — 多源信号加权
+# ============================================================
+
+def aggregate_signals(scalp_score, uri_ok, ibd_risk, news_level, mm_verdict):
+    """
+    Weighted conviction dashboard combining all signal sources.
+    Adapted from edge-signal-aggregator.
+    """
+    signals = {}
+
+    # Scalp engine score (weight: 40%)
+    signals["scalp"] = {"score": scalp_score, "weight": 40, "ok": scalp_score >= 70}
+
+    # Urithiru (weight: 25%)
+    uri_score = 100 if uri_ok else 30
+    signals["urithiru"] = {"score": uri_score, "weight": 25, "ok": uri_ok}
+
+    # IBD risk (weight: 15%)
+    ibd_scores = {"NORMAL": 100, "CAUTION": 60, "HIGH": 30, "SEVERE": 0, "UNKNOWN": 50}
+    ibd_score = ibd_scores.get(ibd_risk, 50)
+    signals["ibd"] = {"score": ibd_score, "weight": 15, "ok": ibd_risk in ("NORMAL", "CAUTION")}
+
+    # News grade (weight: 10%)
+    news_scores = {"HIGH": 50, "MEDIUM": 75, "LOW": 90}
+    news_score = news_scores.get(news_level, 60)
+    signals["news"] = {"score": news_score, "weight": 10, "ok": news_level != "HIGH"}
+
+    # Mental model (weight: 10%)
+    mm_score = {"PASS": 100, "REVISE": 60, "REJECT": 20}
+    mm_s = mm_score.get(mm_verdict, 50)
+    signals["mental"] = {"score": mm_s, "weight": 10, "ok": mm_verdict != "REJECT"}
+
+    # Weighted conviction
+    total_w = sum(v["weight"] for v in signals.values())
+    conviction = sum(v["score"] * v["weight"] / total_w for v in signals.values())
+
+    ok_count = sum(1 for v in signals.values() if v["ok"])
+    consensus = "STRONG" if ok_count >= 5 else \
+                "MODERATE" if ok_count >= 4 else \
+                "WEAK" if ok_count >= 3 else "CONTRADICT"
+
+    return {
+        "conviction": round(conviction, 1),
+        "consensus": consensus,
+        "sources": signals,
+        "go": conviction >= 65 and ok_count >= 3
+    }
+
+
+# ============================================================
+# 11. trade-hypothesis-ideator — 信号模式发现
+# ============================================================
+
+def generate_hypotheses(recent_trades, current_setup):
+    """
+    Generate falsifiable trade hypotheses from recent data.
+    Adapted from trade-hypothesis-ideator.
+    """
+    hypotheses = []
+
+    # H1: Trend continuation
+    hypotheses.append({
+        "id": "H1",
+        "statement": "当前15m趋势将继续延续3-5根K线",
+        "test": "观察接下来5根15m K线方向",
+        "kill_criteria": "连续2根反向K线",
+        "confidence": 65
+    })
+
+    # H2: News fade
+    hypotheses.append({
+        "id": "H2",
+        "statement": "当前消息面冲击将在30分钟内被市场消化",
+        "test": "30分钟后价格是否回到消息前水平",
+        "kill_criteria": "消息后价格持续同向移动>30分钟",
+        "confidence": 50
+    })
+
+    # H3: Support/resistance hold
+    hypotheses.append({
+        "id": "H3",
+        "statement": "1965前低和2080阻力在今日内不会被突破",
+        "test": "日内是否触及1965或2080",
+        "kill_criteria": "价格突破1965下方或2080上方>5点",
+        "confidence": 70
+    })
+
+    return hypotheses
+
+
+# ============================================================
+# 12. strategy-pivot-designer — 策略衰退检测
+# ============================================================
+
+def detect_edge_decay(stats):
+    """
+    Detect if current strategy edge is decaying.
+    Adapted from strategy-pivot-designer.
+    """
+    if stats.get("total", 0) < 5:
+        return {"status": "INSUFFICIENT_DATA", "action": "继续积累样本"}
+
+    win_rate = stats.get("win_rate", 0)
+    avg_win = stats.get("avg_win", 0)
+    avg_loss = abs(stats.get("avg_loss", 0))
+    profit_factor = (avg_win * win_rate / 100) / (avg_loss * (100 - win_rate) / 100) if avg_loss > 0 and win_rate < 100 else 999
+
+    if win_rate >= 60 and profit_factor >= 1.5:
+        status = "HEALTHY"
+        action = "维持当前策略"
+    elif win_rate >= 50 and profit_factor >= 1.0:
+        status = "WATCH"
+        action = "策略有轻微衰退，注意近期表现"
+    elif profit_factor >= 0.7:
+        status = "DEGRADING"
+        action = "考虑调整参数或暂停交易"
+    else:
+        status = "BROKEN"
+        action = "停止交易，深度复盘后重构"
+
+    return {
+        "status": status,
+        "action": action,
+        "win_rate": win_rate,
+        "profit_factor": round(profit_factor, 2),
+        "sample_size": stats.get("total", 0)
+    }
+
+
+# ============================================================
 # 集成测试
 # ============================================================
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ from scalp_engine import (
 )
 from scalp_skills import (
     urithiru_check, mental_model_check, eth_distribution_check,
-    grade_news_impact, validate_params
+    grade_news_impact, validate_params,
+    exposure_coach, check_event_risk, breakout_plan,
+    aggregate_signals, generate_hypotheses, detect_edge_decay
 )
 
 OUTPUT = os.path.expanduser("~/Desktop/scalp-report.txt")
@@ -107,6 +109,18 @@ def main():
         bt = validate_params(DEFAULT_CFG.stop_pts, DEFAULT_CFG.tp_pts,
                              DEFAULT_CFG.account, DEFAULT_CFG.leverage, DEFAULT_CFG.margin_pct)
 
+        # 6-12. Additional skills
+        stats = get_stats()
+        cal_items = []
+        try: cal_items = j10.get_today_events()
+        except: pass
+        exp_c = exposure_coach(ibd['risk'], news_grade['level'], sig_score)
+        evt = check_event_risk(cal_items)
+        brk = breakout_plan(price, high, low, bias)
+        agg = aggregate_signals(sig_score, uri_ok, ibd['risk'], news_grade['level'], mm['verdict'])
+        hyps = generate_hypotheses([], {"price": price, "bias": bias})
+        edge = detect_edge_decay(stats)
+
         # ---- 报告 ----
         report = f"""{sep}
   {now}  ETH 短线面板
@@ -140,7 +154,17 @@ def main():
   思维模型    {mm['verdict']}  (逆: {len(mm['inversion'])} / 一阶: {len(mm['first_principles'])} / 二阶: {len(mm['second_order'])})
   IBD 风险    {ibd['risk']} ({ibd['d_count']}派发/{ibd['lookback_candles']}烛)
   消息分级    {news_grade['level']} (均{news_grade['avg_impact']}/10)
-  参数验证    {'OK' if bt['valid'] else ', '.join(bt['issues'])}  RR={bt['rr']}  最大亏{bt['max_loss_pct']}%"""
+  参数验证    {'OK' if bt['valid'] else ', '.join(bt['issues'])}  RR={bt['rr']}  最大亏{bt['max_loss_pct']}%
+
+{sep}
+  高级技能
+{sep}
+  敞口管理    {exp_c['exposure_pct']}% → {exp_c['recommendation']}
+  事件预警    {evt['risk']} {', '.join(w['title'][:30] for w in evt['warnings']) if evt['warnings'] else '无临近事件'}
+  突破追单    {brk['trigger']}  入场{brk['entry']}  R=1:{brk['rr']}  {'可用' if brk['valid'] else '不可用'}
+  信号聚合    共识 {agg['conviction']:.0f}% ({agg['consensus']})  {'GO' if agg['go'] else 'WAIT'}
+  假说探测    {hyps[0]['statement'][:40]}... (置信{hyps[0]['confidence']}%)
+  策略健康    {edge.get('status','?')} → {edge.get('action','?')}"""
 
         # 消息快讯
         all_items = []
