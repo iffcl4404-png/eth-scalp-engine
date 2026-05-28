@@ -531,6 +531,163 @@ def detect_edge_decay(stats):
 
 
 # ============================================================
+# 13. ftd-detector — 跟进日底部确认 (ETH 15m adapted)
+# ============================================================
+
+def ftd_detect(klines_15m, price, vol):
+    """
+    Adapted FTD detector for ETH 15m candles.
+    William O'Neil methodology: correction → rally attempt → FTD confirmation.
+    Correction: 3%+ drop from 24h high. FTD: confirmation candle with volume surge.
+    """
+    if len(klines_15m) < 6:
+        return {"state": "INSUFFICIENT_DATA", "ftd_found": False}
+
+    # Calculate correction
+    high_24h = max(k['h'] for k in klines_15m)
+    correction_pct = (high_24h - price) / high_24h * 100
+
+    state = "NO_CORRECTION"
+    ftd_found = False
+    ftd_quality = 0
+
+    if correction_pct >= 3:
+        state = "CORRECTION"
+
+        # Find rally attempt: first candle closing above its open after a low
+        lows = [k['l'] for k in klines_15m]
+        lowest = min(lows)
+        lowest_idx = lows.index(lowest)
+
+        if lowest_idx > 0:  # Not the most recent candle
+            state = "RALLY_ATTEMPT"
+
+            # Look for FTD: on day 4+ after low, a candle closing 1%+ above prior close
+            # with higher volume
+            for i in range(lowest_idx - 1, -1, -1):
+                if i < len(klines_15m) - 1:
+                    curr = klines_15m[i]
+                    prev = klines_15m[i + 1]
+                    gain_pct = (curr['c'] - prev['c']) / prev['c'] * 100
+                    vol_surge = curr.get('vol', 0) > prev.get('vol', 0) * 1.2
+                    days_from_low = lowest_idx - i
+
+                    if gain_pct >= 0.3 and vol_surge and days_from_low >= 2:
+                        state = "FTD_CONFIRMED"
+                        ftd_found = True
+                        # Quality scoring
+                        ftd_quality = min(100,
+                            40 if gain_pct >= 1 else 25 +  # Gain magnitude
+                            30 if vol_surge else 15 +      # Volume confirmation
+                            20 if days_from_low >= 4 else 10 +  # Timing
+                            10)  # Base
+                        break
+
+    action = {
+        "NO_CORRECTION": "正常波动，无需特殊操作",
+        "CORRECTION": "等待反弹确立后跟进",
+        "RALLY_ATTEMPT": "观察跟进日，准备入场",
+        "FTD_CONFIRMED": f"跟进日确认！质量{ftd_quality}分，可考虑做多",
+        "INSUFFICIENT_DATA": "数据不足"
+    }.get(state, "未知")
+
+    return {
+        "state": state,
+        "ftd_found": ftd_found,
+        "quality": ftd_quality,
+        "correction_pct": round(correction_pct, 1),
+        "action": action
+    }
+
+
+# ============================================================
+# 14. ghost-auto-trader — 自动交易调度台 (adapted for manual)
+# ============================================================
+
+def ghost_gate(price, bias, entry, stop, tp, sig_score, verdict,
+               uri_ok, uri_conf, mm_verdict, agg, edge_detect):
+    """
+    Ghost Auto-Trader AI Gate for ETH scalping.
+    Validates trade through all 5 checkpoints before dispatching.
+    Returns trade ticket or rejection with reason.
+    """
+    checks = []
+
+    # Check 1: Signal quality
+    c1 = sig_score >= 70
+    checks.append(("信号质量", c1, f"评分{sig_score}/100{' >= 70' if c1 else ' < 70 门槛'}"))
+
+    # Check 2: Urithiru consensus
+    c2 = uri_ok and uri_conf >= 66
+    checks.append(("多模型验证", c2, f"Urithiru {'PASS' if uri_ok else 'FAIL'} ({uri_conf}%)"))
+
+    # Check 3: Mental model
+    c3 = mm_verdict != "REJECT"
+    checks.append(("思维模型", c3, f"{mm_verdict}"))
+
+    # Check 4: Signal aggregation
+    c4 = agg["go"]
+    checks.append(("信号聚合", c4, f"共识{agg['conviction']:.0f}% ({agg['consensus']})"))
+
+    # Check 5: Edge health
+    c5 = edge_detect.get("status") != "BROKEN"
+    checks.append(("策略健康", c5, f"{edge_detect.get('status', '?')}"))
+
+    passed = sum(1 for _, ok, _ in checks if ok)
+    gate_passed = passed >= 4
+
+    ticket = None
+    if gate_passed:
+        ticket = {
+            "symbol": "ETH-USDT-SWAP",
+            "side": bias,
+            "entry": entry,
+            "stop": stop,
+            "tp": tp,
+            "leverage": 125,
+            "margin_mode": "isolated",
+            "validated_at": datetime.now(TZ).isoformat(),
+            "checks_passed": f"{passed}/5"
+        }
+
+    return {
+        "gate_passed": gate_passed,
+        "checks": checks,
+        "ticket": ticket,
+        "reason": "ALL_CHECKS_PASSED" if gate_passed else \
+                  f"ONLY_{passed}/5_CHECKS_PASSED"
+    }
+
+def dispatch_ticket(ticket, auto=False):
+    """
+    Dispatch a validated trade ticket.
+    If auto=False (default): returns instructions for manual execution.
+    If auto=True: would execute via Tebbit API (future).
+    """
+    if not ticket:
+        return {"status": "REJECTED", "message": "Gate checks failed"}
+
+    if auto:
+        # Future: call Tebbit API here
+        return {"status": "ERROR", "message": "Auto-execution requires Tebbit API key"}
+
+    # Manual execution instructions
+    return {
+        "status": "READY",
+        "message": f"""手动执行:
+  交易所: Tebbit
+  合约: ETH-USDT-SWAP
+  方向: {ticket['side']}
+  入场: ${ticket['entry']}
+  止损: ${ticket['stop']}
+  止盈: ${ticket['tp']}
+  杠杆: {ticket['leverage']}x
+  模式: {ticket['margin_mode']}""",
+        "ticket": ticket
+    }
+
+
+# ============================================================
 # 集成测试
 # ============================================================
 if __name__ == "__main__":

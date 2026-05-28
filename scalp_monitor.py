@@ -16,7 +16,8 @@ from scalp_skills import (
     urithiru_check, mental_model_check, eth_distribution_check,
     grade_news_impact, validate_params,
     exposure_coach, check_event_risk, breakout_plan,
-    aggregate_signals, generate_hypotheses, detect_edge_decay
+    aggregate_signals, generate_hypotheses, detect_edge_decay,
+    ftd_detect, ghost_gate, dispatch_ticket
 )
 
 OUTPUT = os.path.expanduser("~/Desktop/scalp-report.txt")
@@ -121,6 +122,13 @@ def main():
         hyps = generate_hypotheses([], {"price": price, "bias": bias})
         edge = detect_edge_decay(stats)
 
+        # 13-14. FTD + Ghost Auto-Trader
+        ftd = ftd_detect(klines, price, vol)
+        gate = ghost_gate(price, bias, pos.entry, pos.stop, pos.tp,
+                          sig_score, verdict, uri_ok, uri_conf,
+                          mm['verdict'], agg, edge)
+        ticket = dispatch_ticket(gate['ticket']) if gate['gate_passed'] else None
+
         # ---- 报告 ----
         report = f"""{sep}
   {now}  ETH 短线面板
@@ -164,7 +172,16 @@ def main():
   突破追单    {brk['trigger']}  入场{brk['entry']}  R=1:{brk['rr']}  {'可用' if brk['valid'] else '不可用'}
   信号聚合    共识 {agg['conviction']:.0f}% ({agg['consensus']})  {'GO' if agg['go'] else 'WAIT'}
   假说探测    {hyps[0]['statement'][:40]}... (置信{hyps[0]['confidence']}%)
-  策略健康    {edge.get('status','?')} → {edge.get('action','?')}"""
+  策略健康    {edge.get('status','?')} → {edge.get('action','?')}
+  FTD 检测    {ftd['state']} (修正{ftd['correction_pct']}%) → {ftd['action'][:40]}
+  Ghost 门禁   {'PASS' if gate['gate_passed'] else 'FAIL'} ({gate['reason']})  {'→ 已出票' if ticket else '→ 不出票'}"""
+
+        if ticket:
+            report += f"""
+{sep}
+  交易指令（Ghost Auto-Trader）
+{sep}
+{ticket['message']}"""
 
         # 消息快讯
         all_items = []
