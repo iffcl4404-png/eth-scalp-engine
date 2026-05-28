@@ -72,6 +72,33 @@ def main():
         if body < 0.5: patterns.append("缩体变盘")
         kline_signal = {"trend_bias": trend, "patterns": patterns}
 
+        # ---- 1小时级别支撑/阻力 ----
+        candles_1h = api_get("https://www.okx.com/api/v5/market/candles?instId=ETH-USDT-SWAP&bar=1H&limit=12")
+        klines_1h = [{'o': float(c[1]), 'h': float(c[2]), 'l': float(c[3]), 'c': float(c[4]), 'vol': float(c[5])} for c in candles_1h['data'][:12]]
+        h1_prices = [k['h'] for k in klines_1h]
+        l1_prices = [k['l'] for k in klines_1h]
+        h1_high = max(h1_prices)
+        h1_low = min(l1_prices)
+        h1_close = klines_1h[0]['c']
+        h1_mid = (h1_high + h1_low) / 2
+
+        # Find key S/R: most tested levels
+        def find_sr_levels(prices, precision=1):
+            levels = {}
+            for p in prices:
+                key = round(p / precision) * precision
+                levels[key] = levels.get(key, 0) + 1
+            return sorted(levels.items(), key=lambda x: x[1], reverse=True)
+
+        resistance_levels = find_sr_levels(h1_prices, 2)
+        support_levels = find_sr_levels(l1_prices, 2)
+        sr_resistance = [r[0] for r in resistance_levels[:3] if r[0] > price]
+        sr_support = [s[0] for s in support_levels[:3] if s[0] < price]
+
+        # 1h trend
+        h1_trend = "上升" if klines_1h[0]['c'] > klines_1h[6]['c'] else "下降" if klines_1h[0]['c'] < klines_1h[6]['c'] else "横盘"
+        h1_range_pct = (h1_high - h1_low) / h1_low * 100 if h1_low > 0 else 0
+
         # ---- 金十消息面 ----
         geo_items, macro_items, crypto_items = [], [], []
         import_bias = "neutral"
@@ -138,8 +165,12 @@ def main():
   24h H ${high:.2f}  L ${low:.2f}
   F&G {fear}  │  费率 {rate:.4f}%
 
-  K线: {trend}  形态: {'、'.join(patterns) if patterns else '无'}
+  K线(15m): {trend}  形态: {'、'.join(patterns) if patterns else '无'}
   消息: {import_bias.upper()}
+
+  1H 趋势: {h1_trend}  │  区间: ${h1_low:.0f} - ${h1_high:.0f} ({h1_range_pct:.1f}%)
+  阻力: {', '.join(f'${r}' for r in sr_resistance[:3]) if sr_resistance else '无'}
+  支撑: {', '.join(f'${s}' for s in sr_support[:3]) if sr_support else '无'}
 
 {sep}
   短线信号
