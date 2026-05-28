@@ -1,0 +1,145 @@
+"""
+ETH 短线监控 — 消息驱动 + 15分钟级别
+用法: python scalp_monitor.py
+输出: ~/Desktop/scalp-report.txt
+"""
+import urllib.request, json, os, sys, ssl
+from datetime import datetime, timezone, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scalp_engine import (
+    DEFAULT_CFG, ScalpConfig, calc_position,
+    score_signal, signal_verdict, detect_news_bias,
+    ActivePosition, record_trade, get_stats
+)
+
+OUTPUT = os.path.expanduser("~/Desktop/scalp-report.txt")
+PROXY = "http://127.0.0.1:7897"
+
+
+def api_get(url):
+    proxy_handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
+    opener = urllib.request.build_opener(proxy_handler)
+    req = urllib.request.Request(url, headers={"User-Agent": "Scalp-Monitor/1.0"})
+    try:
+        with opener.open(req, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=10) as r:
+            return json.loads(r.read())
+
+
+def main():
+    try:
+        TZ = timezone(timedelta(hours=8))
+        now = datetime.now(TZ).strftime("%m/%d %H:%M")
+        sep = "━" * 54
+
+        # ---- 数据采集 ----
+        t = api_get("https://www.okx.com/api/v5/market/ticker?instId=ETH-USDT-SWAP")['data'][0]
+        price = float(t['last'])
+        low, high = float(t['low24h']), float(t['high24h'])
+        chg = (price - float(t['open24h'])) / float(t['open24h']) * 100
+
+        fr = api_get("https://www.okx.com/api/v5/public/funding-rate?instId=ETH-USDT-SWAP")
+        rate = float(fr['data'][0]['fundingRate']) * 100
+
+        fg = api_get("https://api.alternative.me/fng/?limit=1")
+        fear = int(fg['data'][0]['value'])
+
+        # K线
+        candles = api_get("https://www.okx.com/api/v5/market/candles?instId=ETH-USDT-SWAP&bar=15m&limit=6")
+        klines = [{'o': float(c[1]), 'h': float(c[2]), 'l': float(c[3]), 'c': float(c[4])} for c in candles['data'][:6]]
+        latest = klines[0]
+        body = abs(latest['c'] - latest['o'])
+        wl = min(latest['c'], latest['o']) - latest['l']
+        wu = latest['h'] - max(latest['c'], latest['o'])
+        trend = "偏空" if latest['c'] < (latest['h']+latest['l'])/2 else "偏多"
+
+        # 形态
+        patterns = []
+        if wl > body * 1.5: patterns.append("下影长")
+        if wu > body * 1.5: patterns.append("上影长")
+        if body < 0.5: patterns.append("缩体变盘")
+        kline_signal = {"trend_bias": trend, "patterns": patterns}
+
+        # ---- 金十消息面 ----
+        geo_items, macro_items, crypto_items = [], [], []
+        import_bias = "neutral"
+        try:
+            from jin10_fetch import Jin10
+            j10 = Jin10()
+            geo_items = j10.get_geopolitical_impact()
+            macro_items = j10.get_macro_impact()
+            crypto_items = j10.get_crypto_impact()
+            import_bias = detect_news_bias(geo_items, macro_items, crypto_items)
+            j10.close()
+        except Exception:
+            pass
+
+        # ---- 短线信号 ----
+        bias = "做空" if price < 2080 else "做多"
+        pos = calc_position(DEFAULT_CFG, price, bias)
+        sig_score, sig_details = score_signal(price, fear, rate, bias, import_bias, kline_signal)
+        verdict, verdict_note = signal_verdict(sig_score)
+
+        # ---- 报告 ----
+        report = f"""{sep}
+  {now}  ETH 短线面板
+{sep}
+
+  价格 ${price:.2f}  │  日跌 {chg:+.2f}%
+  24h H ${high:.2f}  L ${low:.2f}
+  F&G {fear}  │  费率 {rate:.4f}%
+
+  K线: {trend}  形态: {'、'.join(patterns) if patterns else '无'}
+  消息: {import_bias.upper()}
+
+{sep}
+  短线信号
+{sep}
+
+  方向     {bias}
+  入场     ${pos.entry}  止损 ${pos.stop}  止盈 ${pos.tp}
+  R        = 1:{pos.rr}
+  保证金   {pos.margin}U  ({pos.size}张)
+
+  评分     {sig_score}/100  {verdict}
+  趋势     {sig_details.get('趋势','')}  │  情绪  {sig_details.get('情绪','')}
+  消息     {sig_details.get('消息','')}  │  执行  {sig_details.get('执行','')}
+  →       {verdict_note}"""
+
+        # 消息快讯
+        all_items = []
+        for src, items in [("地缘", geo_items), ("宏观", macro_items), ("加密", crypto_items)]:
+            for item in items[:2]:
+                all_items.append(f"[{src}] {item['time'][:5]} {item['content'][:60]}")
+        if all_items:
+            report += f"\n\n{sep}\n  消息雷达\n{sep}\n  " + "\n  ".join(all_items[:5])
+
+        # 交易统计
+        stats = get_stats()
+        if stats and stats.get("total", 0) > 0:
+            report += f"""
+{sep}
+  交易统计
+{sep}
+  总{stats['total']}单 | 胜{stats['wins']}败{stats['losses']} | 胜率{stats['win_rate']}%
+  累计 {stats['total_pnl']:+.2f}U | 均盈{stats['avg_win']:.2f} | 均亏{stats['avg_loss']:.2f}"""
+
+        report += "\n"
+
+        with open(OUTPUT, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(f"[{now}] OK. ETH {price} -> {bias} {verdict} ({sig_score}/100)")
+
+    except Exception as e:
+        err_msg = f"[出错] {datetime.now().strftime('%m/%d %H:%M')} - {e}\n"
+        print(err_msg)
+        with open(OUTPUT, "w", encoding="utf-8") as f:
+            f.write(err_msg)
+
+
+if __name__ == "__main__":
+    main()
