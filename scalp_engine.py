@@ -23,7 +23,7 @@ class ScalpConfig:
     min_rr: float = 2.0     # 最低盈亏比
     max_hold_min: int = 60  # 最长持仓分钟
 
-DEFAULT_CFG = ScalpConfig(account=9.62)
+DEFAULT_CFG = ScalpConfig(account=88.21, leverage=150, margin_pct=0.10)
 
 
 # ============================================================
